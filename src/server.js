@@ -29,7 +29,14 @@ if (!process.env.MONGODB_URI) {
 // ======================
 // Middleware
 // ======================
-app.use(cors());
+app.use(cors({
+  origin: [
+    "https://railexpress-user.onrender.com",
+    "https://railexpress-admin.onrender.com"
+  ],
+  methods: ["GET", "POST", "PUT", "DELETE"],
+  credentials: true
+}));
 app.use(express.json({ limit: '5mb' }));
 
 // ======================
