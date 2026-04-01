@@ -2,7 +2,7 @@ const mongoose = require('mongoose');
 
 const bookingSchema = new mongoose.Schema(
   {
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: function() { return !this.isAdminCreated; } },
 
     // Journey
     fromStation: { type: String, required: true },
@@ -39,6 +39,9 @@ const bookingSchema = new mongoose.Schema(
       ],
       default: [],
     },
+
+    // For admin-created bookings, userId is null, and we store customer info directly
+    isAdminCreated: { type: Boolean, default: false },
 
     // Customer info (customerName/email) used by admin dashboard
     customerName: { type: String, required: true },

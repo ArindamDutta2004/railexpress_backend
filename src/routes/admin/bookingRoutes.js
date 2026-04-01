@@ -5,6 +5,120 @@ const { generateUpiQrDataUri } = require('../../services/qrService');
 
 const router = express.Router();
 
+// POST /api/admin/booking/create
+router.post(
+  '/create',
+  authRequired,
+  requireRole('admin'),
+  async (req, res) => {
+    try {
+      const {
+        fromStation,
+        toStation,
+        journeyDate,
+        passengerName,
+        age,
+        phone,
+        dateOfBirth,
+        bookingType,
+      } = req.body;
+
+      if (
+        !fromStation ||
+        !toStation ||
+        !journeyDate ||
+        !passengerName ||
+        !age ||
+        !phone ||
+        !dateOfBirth ||
+        !bookingType
+      ) {
+        return res
+          .status(400)
+          .json({
+            message:
+              'fromStation, toStation, journeyDate, passengerName, age, phone, dateOfBirth, bookingType required',
+          });
+      }
+
+      if (fromStation === toStation) {
+        return res.status(400).json({ message: 'fromStation and toStation cannot be same' });
+      }
+
+      const jDate = new Date(journeyDate);
+      if (Number.isNaN(jDate.getTime())) {
+        return res.status(400).json({ message: 'Invalid journey date' });
+      }
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      if (jDate < today) {
+        return res.status(400).json({ message: 'Journey date cannot be in the past' });
+      }
+
+      if (!['tatkal', 'reservation'].includes(String(bookingType).toLowerCase())) {
+        return res.status(400).json({ message: 'bookingType must be tatkal or reservation' });
+      }
+
+      const normalizedBookingType = String(bookingType).toLowerCase();
+      if (normalizedBookingType === 'tatkal') {
+        const tomorrow = new Date(today);
+        tomorrow.setDate(tomorrow.getDate() + 1);
+        const isToday = isSameDay(jDate, today);
+        const isTomorrow = isSameDay(jDate, tomorrow);
+        if (!isToday && !isTomorrow) {
+          return res
+            .status(400)
+            .json({ message: 'Tatkal booking allowed only for today or tomorrow' });
+        }
+      }
+
+      if (!/^\d{10}$/.test(String(phone))) {
+        return res.status(400).json({ message: 'Phone must be 10 digits' });
+      }
+
+      const paymentDeadline = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24h timeout
+
+      const booking = await Booking.create({
+        userId: null, // Admin created, no user
+        fromStation,
+        toStation,
+        journeyDate: jDate,
+        passengerName,
+        dateOfBirth,
+        bookingType: normalizedBookingType,
+        age: Number(age),
+        phone: String(phone),
+        passengers: 1,
+        passengerDetails: [{ name: passengerName, dateOfBirth, age: Number(age) }],
+
+        isAdminCreated: true,
+        customerName: passengerName, // Use passenger name as customer name
+        email: `admin-created-${Date.now()}@example.com`, // Dummy email
+
+        statusPhase1: 'waiting',
+        statusPhase2: 'advance pending',
+        paymentStatus: 'pending',
+        currentStep: 3, // frontend expects admin approval actions at step 3
+        paymentDeadline,
+      });
+
+      res.status(201).json(booking);
+    } catch (err) {
+      console.error('admin booking create error', err);
+      res.status(500).json({ message: 'Booking creation failed' });
+    }
+  }
+);
+
+// Helper function
+function isSameDay(d1, d2) {
+  return (
+    d1.getFullYear() === d2.getFullYear() &&
+    d1.getMonth() === d2.getMonth() &&
+    d1.getDate() === d2.getDate()
+  );
+}
+
 // GET /api/admin/booking/all
 router.get(
   '/all',
