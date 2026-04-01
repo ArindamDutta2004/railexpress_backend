@@ -1,4 +1,5 @@
 require('dotenv').config();
+
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -10,38 +11,62 @@ const Booking = require('./models/Booking');
 
 const app = express();
 
+// ======================
+// 🔍 ENV CHECK (Debug)
+// ======================
+console.log("ENV CHECK:");
+console.log("PORT:", process.env.PORT || "Not set");
+console.log("MONGODB_URI:", process.env.MONGODB_URI ? "Loaded ✅" : "Missing ❌");
+
+// ======================
+// ❌ STOP if no DB URI
+// ======================
+if (!process.env.MONGODB_URI) {
+  console.error("❌ MONGODB_URI is missing in environment variables");
+  process.exit(1);
+}
+
+// ======================
 // Middleware
+// ======================
 app.use(cors());
 app.use(express.json({ limit: '5mb' }));
 
-// Static for uploaded PDFs
+// ======================
+// Static Files
+// ======================
 app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
 
+// ======================
 // Routes
+// ======================
 app.use('/api/user', userRoutes);
 app.use('/api/admin', adminRoutes);
 
+// Health check
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', message: 'Railway booking backend running' });
 });
 
-// MongoDB connection
-const MONGODB_URI =
-  process.env.MONGODB_URI ||
-  'mongodb+srv://ownerkissanhelper385_db_user:fdQc6QG4IOuPoPuC@cluster0.lzizxt6.mongodb.net/?appName=Cluster0';
-
+// ======================
+// MongoDB Connection
+// ======================
 mongoose
-  .connect(MONGODB_URI, {
+  .connect(process.env.MONGODB_URI, {
     dbName: process.env.MONGODB_DB_NAME || 'railway_booking',
   })
   .then(() => {
-    console.log('MongoDB connected');
+    console.log('✅ MongoDB connected');
 
-    // Timeout rule: auto-cancel bookings if payment not done in time
-    const CHECK_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
-    const job = async () => {
+    // ======================
+    // ⏱ Auto-cancel Job
+    // ======================
+    const CHECK_INTERVAL_MS = 5 * 60 * 1000;
+
+    setInterval(async () => {
       try {
         const now = new Date();
+
         const resUpdate = await Booking.updateMany(
           {
             paymentDeadline: { $lte: now },
@@ -57,19 +82,21 @@ mongoose
             },
           }
         );
+
         if (resUpdate.modifiedCount) {
-          console.log('Auto-cancelled bookings count:', resUpdate.modifiedCount);
+          console.log('Auto-cancelled:', resUpdate.modifiedCount);
         }
       } catch (err) {
-        console.error('Auto-cancel job error', err);
+        console.error('Auto-cancel job error:', err);
       }
-    };
-    setInterval(job, CHECK_INTERVAL_MS);
+    }, CHECK_INTERVAL_MS);
 
-    // Promote completed bookings so feedback becomes visible.
-    // Bill upload keeps step < 9 briefly so the UI can still show downloads.
-    const PROMOTE_INTERVAL_MS = 60 * 1000; // 1 minute
-    const promoteCompleted = async () => {
+    // ======================
+    // 📈 Promote Completed
+    // ======================
+    const PROMOTE_INTERVAL_MS = 60 * 1000;
+
+    setInterval(async () => {
       try {
         await Booking.updateMany(
           {
@@ -82,20 +109,33 @@ mongoose
           { $set: { currentStep: 9 } }
         );
       } catch (err) {
-        console.error('promoteCompleted job error', err);
+        console.error('Promote job error:', err);
       }
-    };
-    setInterval(promoteCompleted, PROMOTE_INTERVAL_MS);
+    }, PROMOTE_INTERVAL_MS);
 
+    // ======================
+    // 🚀 Start Server
+    // ======================
     const PORT = process.env.PORT || 5000;
+
     app.listen(PORT, () => {
-      console.log(`Server listening on port ${PORT}`);
+      console.log(`🚀 Server running on port ${PORT}`);
     });
   })
   .catch((err) => {
-    console.error('MongoDB connection error', err);
+    console.error('❌ MongoDB connection error:', err);
     process.exit(1);
   });
 
-module.exports = app;
+// ======================
+// Global Error Handling
+// ======================
+process.on("uncaughtException", (err) => {
+  console.error("❌ Uncaught Exception:", err);
+});
 
+process.on("unhandledRejection", (err) => {
+  console.error("❌ Unhandled Rejection:", err);
+});
+
+module.exports = app;
