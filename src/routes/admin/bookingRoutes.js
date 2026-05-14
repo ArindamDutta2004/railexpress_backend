@@ -6,6 +6,7 @@ const { streamBookingPdf } = require('../../services/pdfService');
 const multer = require('multer');
 const path = require('path');
 const { ensureUploadsDir } = require('../../config/uploadPaths');
+const { downloadStoredPdf } = require('../../utils/documentFile');
 
 const router = express.Router();
 
@@ -241,6 +242,14 @@ router.get(
       const documentAvailable = type === 'ticket' ? booking.ticketPDF : booking.billPDF;
       if (!documentAvailable) {
         return res.status(404).json({ message: `${type} PDF not available yet` });
+      }
+
+      if (!String(documentAvailable).startsWith('generated:')) {
+        return downloadStoredPdf({
+          res,
+          storedPath: documentAvailable,
+          fileName: `${type}-${booking._id}.pdf`,
+        });
       }
 
       console.log(`[pdf] streaming ${type} for booking ${booking._id} to admin ${req.user.id}`);

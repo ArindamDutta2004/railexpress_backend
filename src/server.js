@@ -63,22 +63,40 @@ const allowedOrigins = [
   ...new Set([
     "https://railexpress-user.onrender.com",
     "https://railexpress-admin.onrender.com",
+    "http://localhost:5173",
+    "http://localhost:5174",
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:5174",
     ...envAllowedOrigins,
   ]),
 ];
 
 app.use(cors({
-  origin: [
-    "https://railexpress-user.onrender.com",
-    "https://railexpress-admin.onrender.com",
-    ...envAllowedOrigins,
-  ],
+  origin(origin, callback) {
+    if (!origin || allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    return callback(new Error(`CORS blocked origin: ${origin}`));
+  },
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
   exposedHeaders: ["Content-Disposition", "Content-Type"],
   credentials: true
 }));
 app.use(express.json({ limit: '5mb' }));
+app.use(express.urlencoded({ extended: true, limit: '1mb' }));
+
+app.use((req, _res, next) => {
+  req.on('aborted', () => {
+    console.error('[request] client aborted request', {
+      method: req.method,
+      path: req.originalUrl,
+      contentLength: req.get('content-length') || null,
+      contentType: req.get('content-type') || null,
+    });
+  });
+  next();
+});
 
 // ======================
 // Uploaded files (PDFs, refund QR images) — same folder as multer (uploadPaths)
@@ -128,6 +146,23 @@ app.use('/api/admin', adminRoutes);
 // Health check
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', message: 'Railway booking backend running' });
+});
+
+app.use((err, req, res, next) => {
+  if (res.headersSent) return next(err);
+
+  const status = err.statusCode || err.status || 500;
+  console.error('[express] request error', {
+    method: req.method,
+    path: req.originalUrl,
+    status,
+    message: err.message,
+    stack: process.env.NODE_ENV === 'production' ? undefined : err.stack,
+  });
+
+  return res.status(status).json({
+    message: status >= 500 ? 'Internal server error' : err.message,
+  });
 });
 
 // ======================
