@@ -7,6 +7,7 @@ const multer = require('multer');
 const path = require('path');
 const { ensureUploadsDir } = require('../../config/uploadPaths');
 const { downloadStoredPdf } = require('../../utils/documentFile');
+const { notifyBookingUser } = require('../../services/notificationService');
 
 const router = express.Router();
 
@@ -288,6 +289,7 @@ router.put(
 
       if (!updated) return res.status(409).json({ message: 'Step mismatch or booking not found' });
 
+      await notifyBookingUser(updated, 'booking_approved');
       res.json(updated);
     } catch (err) {
       console.error('approve error', err);
@@ -318,6 +320,7 @@ router.put(
 
       if (!updated) return res.status(409).json({ message: 'Step mismatch or booking not found' });
 
+      await notifyBookingUser(updated, 'booking_cancelled');
       res.json(updated);
     } catch (err) {
       console.error('cancel error', err);
@@ -397,6 +400,7 @@ router.put(
 
       if (!updated) return res.status(409).json({ message: 'Step mismatch or booking not found' });
 
+      await notifyBookingUser(updated, 'advance_amount_set');
       res.json(updated);
     } catch (err) {
       console.error('advance error', err);
@@ -467,6 +471,7 @@ router.put(
           .json({ message: 'User has not marked advance payment done or step mismatch' });
       }
 
+      await notifyBookingUser(updated, 'advance_payment_verified');
       res.json(updated);
     } catch (err) {
       console.error('confirm advance payment error', err);
@@ -504,6 +509,7 @@ router.put(
 
       if (!updated) return res.status(409).json({ message: 'Step mismatch or booking not found' });
 
+      await notifyBookingUser(updated, 'booking_confirmed');
       res.json(updated);
     } catch (err) {
       console.error('booking-done error', err);
@@ -541,6 +547,7 @@ router.put(
           .json({ message: 'User has not marked final payment done or step mismatch' });
       }
 
+      await notifyBookingUser(updated, 'final_payment_verified');
       res.json(updated);
     } catch (err) {
       console.error('confirm final payment error', err);
@@ -570,6 +577,7 @@ router.put(
 
       if (!updated) return res.status(409).json({ message: 'Step mismatch or booking not found' });
 
+      await notifyBookingUser(updated, 'booking_not_done');
       res.json(updated);
     } catch (err) {
       console.error('booking-not-done error', err);
@@ -601,6 +609,7 @@ router.put(
       booking.refundVerifiedAt = new Date();
       booking.refundVerifiedBy = req.user?.name || req.user?.email || 'admin';
       await booking.save({ validateBeforeSave: false });
+      await notifyBookingUser(booking, 'refund_verified');
 
       return res.json({ message: 'Refund proof verified', booking });
     } catch (err) {
@@ -637,6 +646,9 @@ router.post(
       if (!booking.refundVerifiedAt) booking.refundVerifiedAt = new Date();
       if (!booking.refundVerifiedBy) booking.refundVerifiedBy = req.user?.name || req.user?.email || 'admin';
       await booking.save({ validateBeforeSave: false });
+      await notifyBookingUser(booking, 'refund_processed', {
+        eventKey: `refund_processed:${booking._id}:${booking.refundProofScreenshot || booking.refundProcessedAt?.getTime()}`,
+      });
 
       return res.json({ message: 'Refund proof uploaded successfully', booking });
     } catch (err) {
@@ -686,6 +698,11 @@ router.put(
         return res.status(409).json({ message: 'Concurrent update detected, please retry' });
       }
 
+      await notifyBookingUser(updated, 'admin_message', {
+        eventKey: `admin_step_update:${updated._id}:from-${fromStep}:to-${nextStep}`,
+        title: 'Booking Status Updated',
+        body: `Your booking moved to step ${nextStep}.`,
+      });
       res.json(updated);
     } catch (err) {
       console.error('booking update error', err);
@@ -738,10 +755,44 @@ router.put(
         return res.status(409).json({ message: 'Concurrent payment update, please retry' });
       }
 
+      await notifyBookingUser(updated, confirmPayment ? 'advance_payment_verified' : 'admin_message', {
+        eventKey: `payment_update:${updated._id}:from-${fromStep}:to-${nextStep}:${confirmPayment ? 'confirmed' : 'updated'}`,
+        title: confirmPayment ? undefined : 'Payment Details Updated',
+        body: confirmPayment ? undefined : 'Payment details were updated for your booking.',
+      });
       res.json(updated);
     } catch (err) {
       console.error('payment update error', err);
       res.status(500).json({ message: 'Payment update failed' });
+    }
+  }
+);
+
+// POST /api/admin/booking/:id/notify
+// Body: { title?, message }
+router.post(
+  '/:id/notify',
+  authRequired,
+  requireRole('admin'),
+  async (req, res) => {
+    try {
+      const message = String(req.body?.message || '').trim();
+      const title = String(req.body?.title || 'RailXpress Update').trim();
+      if (!message) return res.status(400).json({ message: 'message is required' });
+
+      const booking = await Booking.findById(req.params.id);
+      if (!booking) return res.status(404).json({ message: 'Booking not found' });
+
+      const notification = await notifyBookingUser(booking, 'admin_message', {
+        eventKey: `admin_message:${booking._id}:${Date.now()}`,
+        title,
+        body: message,
+      });
+
+      res.status(201).json({ message: 'Notification sent', notification });
+    } catch (err) {
+      console.error('admin custom notification error', err);
+      res.status(500).json({ message: 'Failed to send notification' });
     }
   }
 );

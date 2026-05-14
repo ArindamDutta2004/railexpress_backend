@@ -7,6 +7,7 @@ const Booking = require('../../models/Booking');
 const { authRequired, requireRole } = require('../../middleware/auth');
 const { UPLOADS_DIR, ensureUploadsDir } = require('../../config/uploadPaths');
 const { deleteUploadFileIfExists } = require('../../utils/documentFile');
+const { notifyBookingUser } = require('../../services/notificationService');
 
 const router = express.Router();
 
@@ -201,6 +202,9 @@ router.post(
       booking.ticketPDF = storedPath;
       if (booking.currentStep < 8) booking.currentStep = 8;
       await booking.save({ validateBeforeSave: false });
+      await notifyBookingUser(booking, 'ticket_pdf_uploaded', {
+        eventKey: `ticket_pdf_uploaded:${booking._id}:${storedPath}`,
+      });
 
       console.log('[upload] ticket PDF stored', {
         bookingId: String(booking._id),
@@ -239,6 +243,12 @@ router.post(
       if (booking.currentStep < 9) booking.currentStep = 9;
       booking.paymentStatus = 'completed';
       await booking.save({ validateBeforeSave: false });
+      await notifyBookingUser(booking, 'bill_pdf_uploaded', {
+        eventKey: `bill_pdf_uploaded:${booking._id}:${storedPath}`,
+      });
+      await notifyBookingUser(booking, 'booking_completed', {
+        eventKey: `booking_completed:${booking._id}`,
+      });
 
       console.log('[upload] bill PDF stored', {
         bookingId: String(booking._id),
@@ -283,6 +293,9 @@ router.post(
       booking.refundProcessedAt = new Date();
       if (!booking.refundVerifiedAt) booking.refundVerifiedAt = new Date();
       await booking.save({ validateBeforeSave: false });
+      await notifyBookingUser(booking, 'refund_processed', {
+        eventKey: `refund_processed:${booking._id}:${booking.refundProofScreenshot}`,
+      });
 
       return res.json({ message: 'Refund proof uploaded and marked as processed', booking });
     } catch (err) {
@@ -325,6 +338,9 @@ router.post(
       booking.refundProcessedAt = new Date();
       if (!booking.refundVerifiedAt) booking.refundVerifiedAt = new Date();
       await booking.save({ validateBeforeSave: false });
+      await notifyBookingUser(booking, 'refund_processed', {
+        eventKey: `refund_processed:${booking._id}:${booking.refundProofScreenshot}`,
+      });
 
       return res.json({ message: 'Refund proof uploaded and marked as processed', booking });
     } catch (err) {
