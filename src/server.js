@@ -13,6 +13,30 @@ const Booking = require('./models/Booking');
 
 const app = express();
 
+async function dropDuplicateBookingIndexes() {
+  try {
+    const indexes = await Booking.collection.indexes();
+    const duplicateConstraintIndexes = indexes.filter((index) => {
+      const keys = Object.keys(index.key || {});
+      return (
+        index.unique === true &&
+        keys.includes('userId') &&
+        keys.includes('fromStation') &&
+        keys.includes('toStation') &&
+        keys.includes('journeyDate')
+      );
+    });
+
+    for (const index of duplicateConstraintIndexes) {
+      if (!index.name || index.name === '_id_') continue;
+      await Booking.collection.dropIndex(index.name);
+      console.log('Dropped duplicate-booking unique index:', index.name);
+    }
+  } catch (err) {
+    console.error('Duplicate booking index cleanup error:', err);
+  }
+}
+
 // ======================
 // 🔍 ENV CHECK (Debug)
 // ======================
@@ -113,8 +137,10 @@ mongoose
   .connect(process.env.MONGODB_URI, {
     dbName: process.env.MONGODB_DB_NAME || 'railway_booking',
   })
-  .then(() => {
+  .then(async () => {
     console.log('✅ MongoDB connected');
+
+    await dropDuplicateBookingIndexes();
 
     // ======================
     // ⏱ Auto-cancel Job

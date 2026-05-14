@@ -156,6 +156,6 @@ bookingSchema.virtual('billUrl').get(function () {
   return this.billPDF;
 });
 
-bookingSchema.index({ userId: 1, journeyDate: 1 });
+bookingSchema.index({ userId: 1, createdAt: -1 });
 
 module.exports = mongoose.model('Booking', bookingSchema);

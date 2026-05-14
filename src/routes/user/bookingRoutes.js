@@ -218,21 +218,6 @@ router.post(
         return res.status(400).json({ message: prefErr.message || 'Invalid preferred trains format' });
       }
 
-      // Prevent duplicates (same from/to/date) for this user
-      const existingSameDay = await Booking.find({
-        userId: req.user.id,
-        journeyDate: {
-          $gte: new Date(jDate.getFullYear(), jDate.getMonth(), jDate.getDate()),
-          $lt: new Date(jDate.getFullYear(), jDate.getMonth(), jDate.getDate() + 1),
-        },
-      });
-      const duplicate = existingSameDay.find(
-        (b) => b.fromStation === fromStation && b.toStation === toStation
-      );
-      if (duplicate) {
-        return res.status(400).json({ message: 'Duplicate booking for same route and date' });
-      }
-
       const paymentDeadline = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24h timeout
 
       const booking = await Booking.create({
@@ -262,6 +247,12 @@ router.post(
       res.status(201).json(booking);
     } catch (err) {
       console.error('booking create error', err);
+      if (err?.code === 11000) {
+        return res.status(409).json({
+          message:
+            'Booking could not be created because of a database uniqueness constraint. Please contact support.',
+        });
+      }
       res.status(500).json({ message: 'Booking creation failed' });
     }
   }
