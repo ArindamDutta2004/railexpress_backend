@@ -2,8 +2,69 @@ const express = require('express');
 const Booking = require('../../models/Booking');
 const { authRequired, requireRole } = require('../../middleware/auth');
 const { generateUpiQrDataUri } = require('../../services/qrService');
+const { streamBookingPdf } = require('../../services/pdfService');
+const multer = require('multer');
+const path = require('path');
+const { ensureUploadsDir } = require('../../config/uploadPaths');
 
 const router = express.Router();
+
+const refundStorage = multer.diskStorage({
+  destination: (_req, _file, cb) => cb(null, ensureUploadsDir()),
+  filename: (_req, file, cb) => {
+    const ext = path.extname(file.originalname || '').toLowerCase() || '.png';
+    cb(null, `refund-proof-${Date.now()}-${Math.random().toString(16).slice(2)}${ext}`);
+  },
+});
+
+const refundImageUpload = multer({
+  storage: refundStorage,
+  fileFilter: (_req, file, cb) => {
+    const name = String(file.originalname || '').toLowerCase();
+    const mime = String(file.mimetype || '').toLowerCase();
+    const ok = mime.startsWith('image/') || /\.(png|jpe?g|webp)$/i.test(name);
+    cb(ok ? null : new Error('Only image files are allowed (png/jpg/webp)'), ok);
+  },
+  limits: { fileSize: 3 * 1024 * 1024 },
+});
+
+function multerRefundProofSingle(field) {
+  const single = refundImageUpload.single(field);
+  return (req, res, next) => {
+    single(req, res, (err) => {
+      if (!err) return next();
+      const msg = err.message || 'Upload failed';
+      return res.status(400).json({ message: msg });
+    });
+  };
+}
+
+function normalizePreferredTrains(raw) {
+  if (raw === undefined || raw === null) return [];
+
+  const asArray = Array.isArray(raw)
+    ? raw
+    : String(raw)
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+
+  const normalized = asArray
+    .map((item) => String(item || '').trim())
+    .filter(Boolean);
+
+  if (normalized.length > 6) {
+    throw new Error('You can add at most 6 preferred trains');
+  }
+
+  for (const entry of normalized) {
+    if (entry.length > 120) {
+      throw new Error('Each preferred train entry must be 120 characters or less');
+    }
+  }
+
+  return normalized;
+}
 
 // POST /api/admin/booking/create
 router.post(
@@ -21,6 +82,7 @@ router.post(
         phone,
         dateOfBirth,
         bookingType,
+        preferredTrains,
       } = req.body;
 
       if (
@@ -55,8 +117,8 @@ router.post(
         return res.status(400).json({ message: 'Journey date cannot be in the past' });
       }
 
-      if (!['tatkal', 'reservation'].includes(String(bookingType).toLowerCase())) {
-        return res.status(400).json({ message: 'bookingType must be tatkal or reservation' });
+      if (!['tatkal', 'reservation', 'vip'].includes(String(bookingType).toLowerCase())) {
+        return res.status(400).json({ message: 'bookingType must be tatkal, reservation, or vip' });
       }
 
       const normalizedBookingType = String(bookingType).toLowerCase();
@@ -76,6 +138,13 @@ router.post(
         return res.status(400).json({ message: 'Phone must be 10 digits' });
       }
 
+      let normalizedPreferredTrains = [];
+      try {
+        normalizedPreferredTrains = normalizePreferredTrains(preferredTrains);
+      } catch (prefErr) {
+        return res.status(400).json({ message: prefErr.message || 'Invalid preferred trains format' });
+      }
+
       const paymentDeadline = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24h timeout
 
       const booking = await Booking.create({
@@ -90,6 +159,7 @@ router.post(
         phone: String(phone),
         passengers: 1,
         passengerDetails: [{ name: passengerName, dateOfBirth, age: Number(age) }],
+        preferredTrains: normalizedPreferredTrains,
 
         isAdminCreated: true,
         customerName: passengerName, // Use passenger name as customer name
@@ -148,6 +218,39 @@ router.get(
     } catch (err) {
       console.error('booking detail fetch error', err);
       res.status(500).json({ message: 'Failed to fetch booking' });
+    }
+  }
+);
+
+// GET /api/admin/booking/:id/download/:type
+// Admin preview/download uses generated PDF streaming, not local PDF files.
+router.get(
+  '/:id/download/:type',
+  authRequired,
+  requireRole('admin'),
+  async (req, res) => {
+    try {
+      const type = String(req.params.type || '').toLowerCase();
+      if (!['ticket', 'bill'].includes(type)) {
+        return res.status(400).json({ message: 'type must be ticket or bill' });
+      }
+
+      const booking = await Booking.findById(req.params.id);
+      if (!booking) return res.status(404).json({ message: 'Booking not found' });
+
+      const documentAvailable = type === 'ticket' ? booking.ticketPDF : booking.billPDF;
+      if (!documentAvailable) {
+        return res.status(404).json({ message: `${type} PDF not available yet` });
+      }
+
+      console.log(`[pdf] streaming ${type} for booking ${booking._id} to admin ${req.user.id}`);
+      return streamBookingPdf({ booking, type, res });
+    } catch (err) {
+      console.error('admin pdf download error', err);
+      if (!res.headersSent) {
+        return res.status(500).json({ message: 'Failed to download document' });
+      }
+      return res.destroy(err);
     }
   }
 );
@@ -466,6 +569,74 @@ router.put(
   }
 );
 
+// PUT /api/admin/booking/:id/refund-verify
+// Mark user refund QR proof as verified by admin.
+router.put(
+  '/:id/refund-verify',
+  authRequired,
+  requireRole('admin'),
+  async (req, res) => {
+    try {
+      const booking = await Booking.findById(req.params.id);
+      if (!booking) return res.status(404).json({ message: 'Booking not found' });
+
+      const isCancelled = booking.statusPhase1 === 'cancelled' || booking.paymentStatus === 'cancelled';
+      if (!isCancelled) {
+        return res.status(400).json({ message: 'Refund verification is allowed only for cancelled bookings' });
+      }
+      if (!booking.refundQRProof) {
+        return res.status(400).json({ message: 'User refund QR/proof has not been uploaded yet' });
+      }
+
+      booking.refundVerificationStatus = 'verified';
+      booking.refundVerifiedAt = new Date();
+      booking.refundVerifiedBy = req.user?.name || req.user?.email || 'admin';
+      await booking.save({ validateBeforeSave: false });
+
+      return res.json({ message: 'Refund proof verified', booking });
+    } catch (err) {
+      console.error('refund verify error', err);
+      return res.status(500).json({ message: 'Failed to verify refund proof' });
+    }
+  }
+);
+
+// POST /api/admin/booking/:id/refund-proof
+// Upload admin refund proof screenshot and mark refund as processed.
+router.post(
+  '/:id/refund-proof',
+  authRequired,
+  requireRole('admin'),
+  multerRefundProofSingle('refundProof'),
+  async (req, res) => {
+    try {
+      const booking = await Booking.findById(req.params.id);
+      if (!booking) return res.status(404).json({ message: 'Booking not found' });
+      if (!req.file) return res.status(400).json({ message: 'Refund proof image is required' });
+
+      const isCancelled = booking.statusPhase1 === 'cancelled' || booking.paymentStatus === 'cancelled';
+      if (!isCancelled) {
+        return res.status(400).json({ message: 'Refund proof upload allowed only for cancelled bookings' });
+      }
+      if (!booking.refundQRProof) {
+        return res.status(400).json({ message: 'User refund QR/proof not uploaded yet' });
+      }
+
+      booking.refundProofScreenshot = `/uploads/${req.file.filename}`;
+      booking.refundVerificationStatus = 'processed';
+      booking.refundProcessedAt = new Date();
+      if (!booking.refundVerifiedAt) booking.refundVerifiedAt = new Date();
+      if (!booking.refundVerifiedBy) booking.refundVerifiedBy = req.user?.name || req.user?.email || 'admin';
+      await booking.save({ validateBeforeSave: false });
+
+      return res.json({ message: 'Refund proof uploaded successfully', booking });
+    } catch (err) {
+      console.error('refund-proof upload error', err);
+      return res.status(500).json({ message: 'Failed to upload refund proof' });
+    }
+  }
+);
+
 // PUT /api/admin/booking/update/:id
 // Uses step-lock: expects fromStep in body, no backward steps
 router.put(
@@ -567,4 +738,3 @@ router.put(
 );
 
 module.exports = router;
-

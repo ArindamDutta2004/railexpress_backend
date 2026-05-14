@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { normalizeStoredUploadPath } = require('../utils/uploadUrl');
 
 const bookingSchema = new mongoose.Schema(
   {
@@ -15,7 +16,7 @@ const bookingSchema = new mongoose.Schema(
     dateOfBirth: { type: String, required: true },
     bookingType: {
       type: String,
-      enum: ['tatkal', 'reservation'],
+      enum: ['tatkal', 'reservation', 'vip'],
       required: true,
       default: 'reservation',
     },
@@ -37,6 +38,10 @@ const bookingSchema = new mongoose.Schema(
           age: { type: Number, required: true },
         },
       ],
+      default: [],
+    },
+    preferredTrains: {
+      type: [String],
       default: [],
     },
 
@@ -87,6 +92,15 @@ const bookingSchema = new mongoose.Schema(
 
     // If booking is cancelled, user can upload refund/payment QR proof (image).
     refundQRProof: { type: String, default: null },
+    refundVerificationStatus: {
+      type: String,
+      enum: ['pending', 'verified', 'processed'],
+      default: 'pending',
+    },
+    refundVerifiedAt: { type: Date, default: null },
+    refundVerifiedBy: { type: String, default: null },
+    refundProofScreenshot: { type: String, default: null },
+    refundProcessedAt: { type: Date, default: null },
 
     currentStep: { type: Number, min: 1, max: 10, default: 3 },
 
@@ -104,6 +118,12 @@ const bookingSchema = new mongoose.Schema(
     toJSON: {
       virtuals: true,
       transform: (doc, ret) => {
+        ret.ticketPDF = normalizeStoredUploadPath(ret.ticketPDF);
+        ret.billPDF = normalizeStoredUploadPath(ret.billPDF);
+        ret.refundQRProof = normalizeStoredUploadPath(ret.refundQRProof);
+        ret.refundProofScreenshot = normalizeStoredUploadPath(ret.refundProofScreenshot);
+        ret.ticketUrl = ret.ticketPDF;
+        ret.billUrl = ret.billPDF;
         ret.id = ret._id?.toString?.() || ret.id;
         delete ret.__v;
         return ret;
@@ -139,4 +159,3 @@ bookingSchema.virtual('billUrl').get(function () {
 bookingSchema.index({ userId: 1, journeyDate: 1 });
 
 module.exports = mongoose.model('Booking', bookingSchema);
-

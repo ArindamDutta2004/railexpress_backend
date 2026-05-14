@@ -1,14 +1,44 @@
 const express = require('express');
 const Booking = require('../../models/Booking');
+const Feedback = require('../../models/Feedback');
 const { authRequired, requireRole } = require('../../middleware/auth');
 const stations = require('../../data/stations.json');
 const multer = require('multer');
 const path = require('path');
-const fs = require('fs');
+
+const { ensureUploadsDir } = require('../../config/uploadPaths');
+const { streamBookingPdf } = require('../../services/pdfService');
 
 const router = express.Router();
 
 // Helper: basic validations
+function normalizePreferredTrains(raw) {
+  if (raw === undefined || raw === null) return [];
+
+  const asArray = Array.isArray(raw)
+    ? raw
+    : String(raw)
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+
+  const normalized = asArray
+    .map((item) => String(item || '').trim())
+    .filter(Boolean);
+
+  if (normalized.length > 6) {
+    throw new Error('You can add at most 6 preferred trains');
+  }
+
+  for (const entry of normalized) {
+    if (entry.length > 120) {
+      throw new Error('Each preferred train entry must be 120 characters or less');
+    }
+  }
+
+  return normalized;
+}
+
 function isSameDay(d1, d2) {
   return (
     d1.getFullYear() === d2.getFullYear() &&
@@ -16,12 +46,6 @@ function isSameDay(d1, d2) {
     d1.getDate() === d2.getDate()
   );
 }
-
-const ensureUploadsDir = () => {
-  const uploadsDir = path.join(__dirname, '..', '..', '..', 'uploads');
-  if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
-  return uploadsDir;
-};
 
 const refundStorage = multer.diskStorage({
   destination: (_req, _file, cb) => {
@@ -80,6 +104,7 @@ router.post(
         bookingType,
         passengers,
         passengerDetails,
+        preferredTrains,
       } = req.body;
 
       if (!fromStation) return res.status(400).json({ message: 'fromStation is required' });
@@ -165,8 +190,8 @@ router.post(
         return res.status(400).json({ message: 'Journey date cannot be in the past' });
       }
 
-      if (!['tatkal', 'reservation'].includes(String(bookingType).toLowerCase())) {
-        return res.status(400).json({ message: 'bookingType must be tatkal or reservation' });
+      if (!['tatkal', 'reservation', 'vip'].includes(String(bookingType).toLowerCase())) {
+        return res.status(400).json({ message: 'bookingType must be tatkal, reservation, or vip' });
       }
 
       const normalizedBookingType = String(bookingType).toLowerCase();
@@ -184,6 +209,13 @@ router.post(
 
       if (!/^\d{10}$/.test(String(phone))) {
         return res.status(400).json({ message: 'Phone must be 10 digits' });
+      }
+
+      let normalizedPreferredTrains = [];
+      try {
+        normalizedPreferredTrains = normalizePreferredTrains(preferredTrains);
+      } catch (prefErr) {
+        return res.status(400).json({ message: prefErr.message || 'Invalid preferred trains format' });
       }
 
       // Prevent duplicates (same from/to/date) for this user
@@ -215,6 +247,7 @@ router.post(
         phone: String(phone),
         passengers: passengerCount,
         passengerDetails: Array.isArray(passengerDetails) ? passengerDetails : undefined,
+        preferredTrains: normalizedPreferredTrains,
 
         customerName: req.user.name,
         email: req.user.email,
@@ -245,10 +278,61 @@ router.get(
         return res.status(403).json({ message: 'Cannot view other user bookings' });
       }
       const bookings = await Booking.find({ userId: req.user.id }).sort({ createdAt: -1 });
-      res.json(bookings);
+      const bookingIds = bookings.map((b) => b._id);
+      const feedbackRows = await Feedback.find({ bookingId: { $in: bookingIds } }).select('bookingId');
+      const feedbackSet = new Set(feedbackRows.map((f) => String(f.bookingId)));
+      const response = bookings.map((b) => {
+        const doc = b.toJSON();
+        doc.feedbackSubmitted = feedbackSet.has(String(b._id));
+        return doc;
+      });
+      res.json(response);
     } catch (err) {
       console.error('booking user list error', err);
       res.status(500).json({ message: 'Failed to fetch user bookings' });
+    }
+  }
+);
+
+// GET /api/user/booking/:id/download/:type
+// Secure download path: user must own booking and submit feedback first.
+router.get(
+  '/:id/download/:type',
+  authRequired,
+  requireRole('user'),
+  async (req, res) => {
+    try {
+      const type = String(req.params.type || '').toLowerCase();
+      if (!['ticket', 'bill'].includes(type)) {
+        return res.status(400).json({ message: 'type must be ticket or bill' });
+      }
+
+      const booking = await Booking.findById(req.params.id);
+      if (!booking) return res.status(404).json({ message: 'Booking not found' });
+      if (String(booking.userId) !== req.user.id) {
+        return res.status(403).json({ message: 'Cannot download documents for other user booking' });
+      }
+
+      const feedback = await Feedback.findOne({ bookingId: booking._id }).select('_id');
+      if (!feedback) {
+        return res.status(403).json({
+          message: 'Please submit feedback before downloading ticket/bill PDF',
+        });
+      }
+
+      const documentAvailable = type === 'ticket' ? booking.ticketPDF : booking.billPDF;
+      if (!documentAvailable) {
+        return res.status(404).json({ message: `${type} PDF not available yet` });
+      }
+
+      console.log(`[pdf] streaming ${type} for booking ${booking._id} to user ${req.user.id}`);
+      return streamBookingPdf({ booking, type, res });
+    } catch (err) {
+      console.error('secure download error', err);
+      if (!res.headersSent) {
+        return res.status(500).json({ message: 'Failed to download document' });
+      }
+      return res.destroy(err);
     }
   }
 );
@@ -321,6 +405,11 @@ router.post(
       }
 
       booking.refundQRProof = `/uploads/${req.file.filename}`;
+      booking.refundVerificationStatus = 'pending';
+      booking.refundVerifiedAt = null;
+      booking.refundVerifiedBy = null;
+      booking.refundProofScreenshot = null;
+      booking.refundProcessedAt = null;
       await booking.save({ validateBeforeSave: false });
       res.json({ message: 'Refund QR uploaded successfully', booking });
     } catch (err) {
@@ -331,4 +420,3 @@ router.post(
 );
 
 module.exports = router;
-

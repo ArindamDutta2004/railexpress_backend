@@ -4,7 +4,9 @@ const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const path = require('path');
+const fs = require('fs');
 
+const { UPLOADS_DIR, ensureUploadsDir } = require('./config/uploadPaths');
 const userRoutes = require('./routes/user');
 const adminRoutes = require('./routes/admin');
 const Booking = require('./models/Booking');
@@ -29,20 +31,69 @@ if (!process.env.MONGODB_URI) {
 // ======================
 // Middleware
 // ======================
+const envAllowedOrigins = (process.env.CORS_ORIGINS || process.env.FRONTEND_URLS || '')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+const allowedOrigins = [
+  ...new Set([
+    "https://railexpress-user.onrender.com",
+    "https://railexpress-admin.onrender.com",
+    ...envAllowedOrigins,
+  ]),
+];
+
 app.use(cors({
   origin: [
     "https://railexpress-user.onrender.com",
-    "https://railexpress-admin.onrender.com"
+    "https://railexpress-admin.onrender.com",
+    ...envAllowedOrigins,
   ],
-  methods: ["GET", "POST", "PUT", "DELETE"],
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+  exposedHeaders: ["Content-Disposition", "Content-Type"],
   credentials: true
 }));
 app.use(express.json({ limit: '5mb' }));
 
 // ======================
-// Static Files
+// Uploaded files (PDFs, refund QR images) — same folder as multer (uploadPaths)
 // ======================
-app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
+ensureUploadsDir();
+console.log('📁 Serving uploads from:', UPLOADS_DIR);
+const LEGACY_UPLOADS_DIR = path.resolve(__dirname, '..', 'uploads');
+const hasLegacyUploadsDir =
+  LEGACY_UPLOADS_DIR !== UPLOADS_DIR && fs.existsSync(LEGACY_UPLOADS_DIR);
+if (hasLegacyUploadsDir) {
+  console.log('📁 Serving legacy uploads fallback from:', LEGACY_UPLOADS_DIR);
+}
+
+// Use express.static — not app.get('/uploads/:filename'). In Express 5, :filename
+// does not match many real filenames (e.g. *.jpeg), which produced HTML "Cannot GET"
+// while *.txt worked. Static serving uses the path on disk, not path-to-regexp.
+app.use(
+  '/uploads',
+  express.static(UPLOADS_DIR, { index: false, etag: true, fallthrough: true })
+);
+if (hasLegacyUploadsDir) {
+  app.use(
+    '/uploads',
+    express.static(LEGACY_UPLOADS_DIR, { index: false, etag: true, fallthrough: true })
+  );
+}
+app.use('/uploads', (req, res) => {
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    return res.status(405).json({ message: 'Method not allowed' });
+  }
+  const rel = String(req.path || '').replace(/^\/+/, '');
+  if (!rel || rel.includes('..')) {
+    return res.status(400).json({ message: 'Invalid path' });
+  }
+  res.status(404).json({
+    message: 'File not found',
+    hint: 'On Render/cloud, use a persistent disk and set UPLOAD_ROOT, or files disappear after redeploy.',
+  });
+});
 
 // ======================
 // Routes
