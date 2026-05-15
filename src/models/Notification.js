@@ -15,6 +15,14 @@ const notificationSchema = new mongoose.Schema(
     delivery: {
       successCount: { type: Number, default: 0 },
       failureCount: { type: Number, default: 0 },
+      attemptedCount: { type: Number, default: 0 },
+      errors: [
+        {
+          code: { type: String, default: '' },
+          message: { type: String, default: '' },
+          tokenSuffix: { type: String, default: '' },
+        },
+      ],
     },
   },
   { timestamps: true }

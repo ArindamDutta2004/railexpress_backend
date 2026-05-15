@@ -5,6 +5,8 @@ const { getFirebaseAdmin } = require('../config/firebaseAdmin');
 
 const CLIENT_BASE_URL =
   process.env.USER_FRONTEND_URL || process.env.FRONTEND_USER_URL || 'https://railexpress-user.onrender.com';
+const NOTIFICATION_ICON_URL =
+  process.env.NOTIFICATION_ICON_URL || new URL('/railxpress-icon.svg', CLIENT_BASE_URL).toString();
 
 const BOOKING_EVENT_COPY = {
   booking_approved: {
@@ -89,54 +91,109 @@ async function removeInvalidTokens(responses, tokens) {
       { token: { $in: invalidTokens } },
       { $set: { disabledAt: new Date() } }
     );
+    console.warn('[notification] disabled invalid FCM tokens', { count: invalidTokens.length });
   }
+}
+
+function deliveryErrors(responses, tokens) {
+  return responses
+    .map((response, index) => {
+      if (!response.error) return null;
+      return {
+        code: response.error.code || 'unknown',
+        message: response.error.message || 'FCM send failed',
+        tokenSuffix: tokens[index] ? tokens[index].slice(-12) : '',
+      };
+    })
+    .filter(Boolean)
+    .slice(0, 10);
+}
+
+function stringifyData(data = {}) {
+  return Object.entries(data).reduce((acc, [key, value]) => {
+    if (value === undefined || value === null) return acc;
+    acc[key] = String(value);
+    return acc;
+  }, {});
 }
 
 async function sendPushToUser(userId, notification) {
   const firebaseAdmin = getFirebaseAdmin();
-  if (!firebaseAdmin) return { successCount: 0, failureCount: 0 };
+  if (!firebaseAdmin) {
+    return {
+      successCount: 0,
+      failureCount: 0,
+      attemptedCount: 0,
+      errors: [{ code: 'firebase-admin-not-configured', message: 'Firebase Admin SDK is not configured' }],
+    };
+  }
 
   const tokenDocs = await FcmToken.find({ userId, disabledAt: null }).select('token');
   const tokens = tokenDocs.map((doc) => doc.token).filter(Boolean);
-  if (!tokens.length) return { successCount: 0, failureCount: 0 };
+  if (!tokens.length) {
+    return {
+      successCount: 0,
+      failureCount: 0,
+      attemptedCount: 0,
+      errors: [{ code: 'no-active-fcm-tokens', message: 'User has no active FCM tokens' }],
+    };
+  }
+
+  const targetUrl = notification.url || bookingUrl(notification.bookingId);
+  const notificationId = notification._id.toString();
+  const data = stringifyData({
+    notificationId,
+    bookingId: objectIdString(notification.bookingId) || '',
+    eventType: notification.eventType,
+    eventKey: notification.eventKey,
+    title: notification.title,
+    body: notification.body,
+    url: targetUrl,
+    click_action: targetUrl,
+    icon: NOTIFICATION_ICON_URL,
+    badge: NOTIFICATION_ICON_URL,
+  });
 
   const message = {
     tokens,
-    notification: {
-      title: notification.title,
-      body: notification.body,
-    },
-    data: {
-      notificationId: notification._id.toString(),
-      bookingId: objectIdString(notification.bookingId) || '',
-      eventType: notification.eventType,
-      url: notification.url || '/dashboard',
-      click_action: notification.url || '/dashboard',
-    },
+    data,
     webpush: {
-      fcmOptions: {
-        link: notification.url || bookingUrl(notification.bookingId),
+      headers: {
+        TTL: '86400',
+        Urgency: 'high',
       },
-      notification: {
-        title: notification.title,
-        body: notification.body,
-        icon: '/vite.svg',
-        badge: '/vite.svg',
-        tag: notification.eventKey,
-        requireInteraction: false,
-        data: {
-          url: notification.url || '/dashboard',
-          notificationId: notification._id.toString(),
-        },
+      fcmOptions: {
+        link: targetUrl,
       },
     },
   };
 
   const response = await firebaseAdmin.messaging().sendEachForMulticast(message);
   await removeInvalidTokens(response.responses, tokens);
+  const errors = deliveryErrors(response.responses, tokens);
+  if (response.failureCount > 0) {
+    console.warn('[notification] FCM delivery failures', {
+      userId: String(userId),
+      notificationId,
+      eventType: notification.eventType,
+      successCount: response.successCount,
+      failureCount: response.failureCount,
+      errors,
+    });
+  } else {
+    console.info('[notification] FCM delivery sent', {
+      userId: String(userId),
+      notificationId,
+      eventType: notification.eventType,
+      successCount: response.successCount,
+    });
+  }
+
   return {
     successCount: response.successCount,
     failureCount: response.failureCount,
+    attemptedCount: tokens.length,
+    errors,
   };
 }
 

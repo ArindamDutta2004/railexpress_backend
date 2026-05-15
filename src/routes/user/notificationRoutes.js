@@ -41,6 +41,14 @@ router.post('/token', async (req, res) => {
   try {
     const token = String(req.body?.token || '').trim();
     if (!token) return res.status(400).json({ message: 'FCM token is required' });
+    const previousToken = String(req.body?.previousToken || '').trim();
+
+    if (previousToken && previousToken !== token) {
+      await FcmToken.updateOne(
+        { userId: req.user.id, token: previousToken },
+        { $set: { disabledAt: new Date() } }
+      );
+    }
 
     const tokenDoc = await FcmToken.findOneAndUpdate(
       { token },
@@ -55,6 +63,13 @@ router.post('/token', async (req, res) => {
       },
       { upsert: true, new: true, setDefaultsOnInsert: true }
     );
+
+    console.info('[notification] FCM token registered', {
+      userId: req.user.id,
+      tokenId: String(tokenDoc._id),
+      platform: tokenDoc.platform,
+      tokenSuffix: token.slice(-12),
+    });
 
     res.status(201).json({ message: 'Notification device registered', id: tokenDoc._id });
   } catch (err) {
